@@ -10,14 +10,15 @@
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check server.js && node --check public/app.js",
+    "check": "node --check server.js && node --check database.js && node --check public/app.js",
     "test:browser": "playwright test"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.3.1",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "pg": "8.16.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1"

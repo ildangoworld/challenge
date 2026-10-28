@@ -1,7 +1,7 @@
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import { createClient } from "@libsql/client";
+import { openDatabase } from "./database.js";
 import {
   randomBytes,
   scrypt as scryptCallback,
@@ -9,75 +9,12 @@ import {
   createHash,
 } from "node:crypto";
 import { promisify } from "node:util";
-import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scrypt = promisify(scryptCallback);
 const root = dirname(fileURLToPath(import.meta.url));
-const dbPath = process.env.DB_PATH || resolve(root, "data/pace.sqlite");
-if (
-  process.env.NODE_ENV === "production" &&
-  (!/^(libsql|https):\/\//.test(process.env.TURSO_DATABASE_URL || "") ||
-    !process.env.TURSO_AUTH_TOKEN)
-)
-  throw new Error(
-    "Production requires a remote TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for persistent storage.",
-  );
-if (!process.env.TURSO_DATABASE_URL)
-  mkdirSync(dirname(dbPath), { recursive: true });
-const client = createClient({
-  url: process.env.TURSO_DATABASE_URL || `file:${dbPath}`,
-  authToken: process.env.TURSO_AUTH_TOKEN,
-  intMode: "number",
-});
-function connection(c) {
-  return {
-    prepare(sql) {
-      return {
-        async get(...args) {
-          return (await c.execute({ sql, args })).rows[0];
-        },
-        async all(...args) {
-          return (await c.execute({ sql, args })).rows;
-        },
-        async run(...args) {
-          const r = await c.execute({ sql, args });
-          return { ...r, lastInsertRowid: Number(r.lastInsertRowid) };
-        },
-      };
-    },
-    exec(sql) {
-      return c.executeMultiple(sql);
-    },
-  };
-}
-const db = connection(client);
-async function transaction(fn) {
-  const t = await client.transaction("write");
-  try {
-    const value = await fn(connection(t));
-    await t.commit();
-    return value;
-  } catch (e) {
-    await t.rollback();
-    throw e;
-  } finally {
-    t.close();
-  }
-}
-await db.exec(`PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL, nickname TEXT NOT NULL, avatar TEXT NOT NULL DEFAULT '', password TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,expires INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS crews(id INTEGER PRIMARY KEY,name TEXT NOT NULL,description TEXT NOT NULL,code TEXT UNIQUE NOT NULL,owner_id INTEGER REFERENCES users(id));
-CREATE TABLE IF NOT EXISTS members(crew_id INTEGER REFERENCES crews(id),user_id INTEGER REFERENCES users(id),PRIMARY KEY(crew_id,user_id));
-CREATE TABLE IF NOT EXISTS challenges(id INTEGER PRIMARY KEY,crew_id INTEGER REFERENCES crews(id),name TEXT NOT NULL,goal INTEGER NOT NULL,start TEXT NOT NULL,end TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS participants(challenge_id INTEGER REFERENCES challenges(id),user_id INTEGER REFERENCES users(id),PRIMARY KEY(challenge_id,user_id));
-CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,challenge_id INTEGER REFERENCES challenges(id),user_id INTEGER REFERENCES users(id),date TEXT NOT NULL,distance REAL NOT NULL,minutes REAL NOT NULL,note TEXT NOT NULL,created INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS resets(token TEXT PRIMARY KEY,user_id INTEGER REFERENCES users(id),expires INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS runs_challenge_date ON runs(challenge_id,date);
-CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires);
-CREATE TABLE IF NOT EXISTS auth_buckets(key TEXT PRIMARY KEY,attempts INTEGER NOT NULL,expires INTEGER NOT NULL);`);
+const { db, client, transaction } = await openDatabase(root);
 const app = express();
 if (process.env.TRUST_PROXY === "1") app.set("trust proxy", 1);
 app.use(
@@ -250,7 +187,7 @@ app.post("/api/register", authLimit, async (req, res) => {
       )
       .run(username, email, nickname, p);
   } catch (e) {
-    if (e.code?.includes("CONSTRAINT") || e.message.includes("UNIQUE"))
+    if (e.code === "23505" || e.code?.includes("CONSTRAINT") || e.message.includes("UNIQUE"))
       fail("이미 사용 중인 아이디 또는 이메일입니다.", 409);
     throw e;
   }
@@ -360,7 +297,7 @@ app.post("/api/reset-password", authLimit, async (req, res) => {
   const password = await passwordHash(p);
   await transaction(async (tx) => {
     const valid = await tx
-      .prepare("SELECT 1 FROM resets WHERE token=? AND expires>?")
+      .prepare("DELETE FROM resets WHERE token=? AND expires>? RETURNING user_id")
       .get(hash(token), Date.now());
     if (!valid) fail("이미 사용했거나 만료된 링크입니다.");
     await tx
@@ -375,7 +312,7 @@ app.get("/api/crews", requireUser, async (req, res) =>
   res.json(
     await db
       .prepare(
-        "SELECT c.*,(SELECT COUNT(*) FROM members WHERE crew_id=c.id) AS member_count FROM crews c JOIN members m ON c.id=m.crew_id WHERE m.user_id=? ORDER BY c.id",
+        "SELECT c.*,(SELECT CAST(COUNT(*) AS INTEGER) FROM members WHERE crew_id=c.id) AS member_count FROM crews c JOIN members m ON c.id=m.crew_id WHERE m.user_id=? ORDER BY c.id",
       )
       .all(req.user.id),
   ),
@@ -417,7 +354,7 @@ app.get("/api/crews/:id/challenges", requireUser, async (req, res) => {
   res.json(
     await db
       .prepare(
-        "SELECT c.*,(SELECT COUNT(*) FROM participants WHERE challenge_id=c.id) AS participant_count,EXISTS(SELECT 1 FROM participants WHERE challenge_id=c.id AND user_id=?) AS joined FROM challenges c WHERE crew_id=? ORDER BY start DESC,id DESC",
+        "SELECT c.*,(SELECT CAST(COUNT(*) AS INTEGER) FROM participants WHERE challenge_id=c.id) AS participant_count,EXISTS(SELECT 1 FROM participants WHERE challenge_id=c.id AND user_id=?) AS joined FROM challenges c WHERE crew_id=? ORDER BY start DESC,id DESC",
       )
       .all(req.user.id, req.params.id),
   );
@@ -444,7 +381,7 @@ app.post("/api/crews/:id/challenges", requireUser, async (req, res) => {
   const id = await transaction(async (tx) => {
     const r = await tx
       .prepare(
-        "INSERT INTO challenges(crew_id,name,goal,start,end) VALUES(?,?,?,?,?)",
+        "INSERT INTO challenges(crew_id,name,goal,start,\"end\") VALUES(?,?,?,?,?)",
       )
       .run(crew.id, name, goal, start, end);
     await tx

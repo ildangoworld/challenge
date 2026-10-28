@@ -18,7 +18,7 @@
 
 ## 개발 환경
 
-Node.js 24를 사용합니다. 프런트엔드는 별도 빌드가 필요 없는 HTML/CSS/JavaScript, 서버는 Express, 저장소는 SQLite/Turso(libSQL)입니다.
+Node.js 24를 사용합니다. 프런트엔드는 별도 빌드가 필요 없는 HTML/CSS/JavaScript, 서버는 Express, 운영 저장소는 Supabase Postgres, 로컬 저장소는 SQLite입니다.
 
 ```sh
 cd /workspace/challenge
@@ -38,44 +38,29 @@ npm run test:browser
 
 브라우저 테스트는 `/usr/bin/chromium`을 기본으로 사용합니다. 다른 Chromium 경로를 쓰려면 `CHROMIUM_PATH`를 지정하세요. API 테스트와 브라우저 테스트는 별도의 임시 데이터베이스를 사용하여 실제 개발 기록을 건드리지 않습니다.
 
-## Vercel 배포
+## Supabase 전환 및 Vercel 배포
 
-배포 설정은 `vercel.json`, 서버리스 진입점은 `api/index.js`입니다. Vercel의 임시 파일시스템에 회원 기록을 저장하지 않도록 운영 환경에서는 Turso 연결을 필수로 확인합니다.
+운영 저장소는 Supabase Postgres입니다. 서버 전용 `DATABASE_URL`에 Supabase Connect 화면의 **Transaction pooler (6543)** 연결 문자열을 비밀 환경 변수로 등록하세요. TLS 인증서 검증을 유지하며, 필요하면 Supabase CA를 Node.js 신뢰 저장소에 추가하세요. 브라우저에는 데이터베이스 비밀번호나 서비스 키를 전달하지 않습니다. 기존 아이디·비밀번호, 해시된 세션과 크루 권한 모델을 유지하며 Supabase Auth로 계정을 변경하지 않습니다.
 
-1. Turso에서 영구 데이터베이스와 접근 토큰을 만들거나 Vercel Marketplace의 Turso 연동을 사용합니다.
-2. Vercel에 `ildangoworld/challenge` 저장소를 가져옵니다. Framework Preset은 **Other**, Node.js는 **24.x**, Build Command는 **npm run check**, Output Directory는 **public**입니다. 저장소의 설정 파일을 그대로 사용하세요.
-3. Vercel의 환경 변수에 아래 필수 항목을 안전하게 등록한 후 배포합니다. 테이블은 첫 서버 실행 때 자동 생성됩니다.
+1. PACE 전용 Supabase 프로젝트에 `postgres-schema.sql`을 적용합니다. 애플리케이션 시작 시 운영 스키마를 자동 변경하지 않습니다.
+2. 기존 Turso 데이터가 있으면 쓰기를 중단하고 백업한 뒤, 비어 있는 대상 DB에 `node --env-file=.env scripts/import-turso.js`를 실행합니다. 소스용 `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, 대상용 `DATABASE_URL`은 안전하게 환경에 설정하세요. 모든 테이블을 한 트랜잭션에서 가져오고 행 수와 ID 시퀀스를 검증합니다. 원본 데이터는 수정하지 않습니다.
+3. Vercel에 저장소를 연결합니다. Framework는 Other, Node.js는 24.x이며 `vercel.json`을 사용합니다.
+4. 운영 환경에 `DATABASE_URL`, `TRUST_PROXY=1`을 등록합니다. 메일 재설정 사용 시 `APP_ORIGIN`, `RESEND_API_KEY`, `MAIL_FROM`도 등록합니다.
+5. 배포한 공개 URL에서 `/api/health`와 두 계정의 가입 → 크루 가입 → 챌린지 참여 → 기록 → 통계 → 재로그인 후 데이터 유지를 확인합니다.
 
-| 변수                 | 설정                                                                  |
-| -------------------- | --------------------------------------------------------------------- |
-| `TURSO_DATABASE_URL` | 필수. 제공된 `libsql://…turso.io` 주소                                |
-| `TURSO_AUTH_TOKEN`   | 필수. DB 접근 토큰. 비밀 값으로 등록                                  |
-| `TRUST_PROXY`        | Vercel에서 `1`                                                        |
-| `APP_ORIGIN`         | 선택. 정확한 운영 HTTPS 주소, 마지막 `/` 제외. 이메일 재설정에는 필수 |
-| `RESEND_API_KEY`     | 이메일 재설정 활성화 시 필수. 비밀 값으로 등록                        |
-| `MAIL_FROM`          | 이메일 재설정 활성화 시 필수. Resend에서 검증된 발신 주소             |
+RLS를 모든 테이블에 적용하고 `anon`·`authenticated`의 테이블 접근을 차단합니다. 서버 DB 연결은 기존 Express 권한 검사를 수행합니다. 운영 전용 프로젝트에서만 스키마를 적용하세요. 원본 Turso는 전환 검증 및 복구 기간까지 보존하세요.
 
-Vercel CLI로 배포할 경우 로그인하고 프로젝트에 위 환경 변수를 등록한 뒤 다음 명령을 실행합니다.
-
-```sh
-npx vercel --prod
-```
-
-배포 후 `/api/health`의 `{"ok":true}` 응답을 확인하고, 두 계정으로 가입 → 크루 가입 → 챌린지 참여 → 기록 등록 → 다른 계정에서 통계 확인 → 재로그인 후 기록 유지까지 확인하세요. 공개 URL에서 이 검증을 마치기 전에는 실제 운영 검증이 완료된 것으로 보지 않습니다.
-
-메일 설정이 없으면 일반 가입·로그인·크루·기록 기능은 동작하고, 비밀번호 재설정 화면에는 서비스 미연결 안내가 표시됩니다. 메일 실제 도착 여부는 검증된 발신 도메인 연결 후 확인해야 합니다. API 키나 토큰은 채팅, 소스 코드, 저장소에 넣지 마세요.
-
-클라우드 환경에서 직접 Vercel을 이용할 때는 환경 설정에서 `vercel.com`, `api.vercel.com`, `auth.vercel.com`을, Turso·메일 연결 시 `api.turso.tech`, 해당 `*.turso.io` 호스트, `api.resend.com`을 허용해야 합니다. 환경 설정 초안 저장과 실제 적용·게시는 별개입니다.
+로컬 개발과 기존 테스트는 SQLite를 사용합니다. Postgres 검증에는 전용 테스트 데이터베이스의 `DATABASE_URL`을 설정하세요. API 테스트가 계정을 생성하므로 운영 데이터베이스에 실행하지 마세요.
 
 ## 운영 메모
 
 - 비밀번호는 scrypt로 해시하고 세션·재설정 토큰도 해시하여 저장합니다. 운영 쿠키는 HttpOnly·Secure·SameSite=Lax입니다.
 - 크루의 러닝 기록과 참여자 닉네임은 같은 크루 멤버만 조회할 수 있습니다. 이메일과 아이디는 본인에게만 반환합니다.
 - 인증 요청 횟수 제한은 데이터베이스에 저장해 서버리스 인스턴스 사이에서도 공유합니다.
-- Turso 데이터베이스와 인증 토큰은 재배포마다 유지하세요. 백업과 복원은 Turso 설정에서 관리하세요.
+- Supabase 데이터베이스와 연결 환경 변수는 재배포마다 유지하세요. 백업과 복원은 Supabase에서 관리하세요.
 - 프로필 이미지는 브라우저에서 160×160 WebP로 줄여 데이터베이스에 저장합니다. 별도 이미지 스토리지는 필요하지 않습니다.
 - 운영 DB에는 샘플 회원이나 공용 관리자 비밀번호를 만들지 않습니다. 첫 사용자가 직접 가입해 크루를 생성합니다.
 
 ## 현재 검증 범위
 
-로컬 서버·실제 SQLite 저장소 기반 API 테스트 및 모바일·데스크톱 Chromium 테스트를 제공합니다. Vercel 계정, 운영 Turso 데이터베이스, 메일 서비스는 사용자 계정 연결이 필요한 외부 항목입니다. 저장소 파일과 테스트 통과만으로 공개 배포나 운영 DB 연결이 완료되는 것은 아닙니다.
+로컬 서버·실제 SQLite 저장소 기반 API 테스트 및 모바일·데스크톱 Chromium 테스트를 제공합니다. Vercel 계정, 운영 Supabase 데이터베이스, 메일 서비스는 사용자 계정 연결이 필요한 외부 항목입니다. 저장소 파일과 테스트 통과만으로 공개 배포나 운영 DB 연결이 완료되는 것은 아닙니다.
