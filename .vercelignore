@@ -1,0 +1,10 @@
+node_modules
+data
+test
+test-results
+playwright-report
+docs
+.github
+.env
+.env.*
+README.md
